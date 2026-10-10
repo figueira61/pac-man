@@ -22,6 +22,10 @@
             overflow: hidden;
         }
 
+        /* D-Pad grande; adapta-se à altura do ecrã e o canvas encolhe para caber */
+        :root { --dp: clamp(170px, 30dvh, 260px); }
+        #gameCanvas { max-width: 100%; height: auto; max-height: calc(100dvh - var(--dp) - 150px); min-height: 220px; }
+
         .font-arcade {
             font-family: 'Press Start 2P', cursive;
         }
@@ -126,12 +130,12 @@
 
     <!-- D-Pad Virtual Mobile Ampliado -->
     <footer class="w-full max-w-md my-2 pt-1 flex flex-col items-center">
-        <div class="relative w-56 h-56 sm:w-60 sm:h-60 grid grid-cols-3 grid-rows-3 gap-2 p-1">
-            <button id="btnUp" class="btn-touch col-start-2 row-start-1 rounded-2xl flex items-center justify-center text-yellow-400 text-3xl font-extrabold shadow-lg">▲</button>
-            <button id="btnLeft" class="btn-touch col-start-1 row-start-2 rounded-2xl flex items-center justify-center text-yellow-400 text-3xl font-extrabold shadow-lg">◄</button>
+        <div id="dpad" class="relative w-full grid grid-cols-3 grid-rows-3 gap-2 p-1" style="touch-action: none; height: var(--dp);">
+            <button id="btnUp" class="btn-touch col-start-2 row-start-1 rounded-2xl flex items-center justify-center text-yellow-400 text-4xl font-extrabold shadow-lg">▲</button>
+            <button id="btnLeft" class="btn-touch col-start-1 row-start-2 rounded-2xl flex items-center justify-center text-yellow-400 text-4xl font-extrabold shadow-lg">◄</button>
             <div class="col-start-2 row-start-2 bg-yellow-500/10 rounded-2xl border border-yellow-500/20 flex items-center justify-center text-yellow-500/40 text-sm font-bold">●</div>
-            <button id="btnRight" class="btn-touch col-start-3 row-start-2 rounded-2xl flex items-center justify-center text-yellow-400 text-3xl font-extrabold shadow-lg">►</button>
-            <button id="btnDown" class="btn-touch col-start-2 row-start-3 rounded-2xl flex items-center justify-center text-yellow-400 text-3xl font-extrabold shadow-lg">▼</button>
+            <button id="btnRight" class="btn-touch col-start-3 row-start-2 rounded-2xl flex items-center justify-center text-yellow-400 text-4xl font-extrabold shadow-lg">►</button>
+            <button id="btnDown" class="btn-touch col-start-2 row-start-3 rounded-2xl flex items-center justify-center text-yellow-400 text-4xl font-extrabold shadow-lg">▼</button>
         </div>
     </footer>
 
@@ -562,20 +566,47 @@ var RETRO = (function () {
             if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') setDirection(1, 0);
         });
 
-        ['btnUp', 'btnDown', 'btnLeft', 'btnRight'].forEach(id => {
-            const btn = document.getElementById(id);
-            const handler = (e) => {
-                e.preventDefault();
-                btn.classList.add('active-pressed');
-                if (id === 'btnUp') setDirection(0, -1);
-                if (id === 'btnDown') setDirection(0, 1);
-                if (id === 'btnLeft') setDirection(-1, 0);
-                if (id === 'btnRight') setDirection(1, 0);
-            };
-            btn.addEventListener('pointerdown', handler);
-            btn.addEventListener('pointerup', () => btn.classList.remove('active-pressed'));
-            btn.addEventListener('pointerleave', () => btn.classList.remove('active-pressed'));
+        // D-Pad: toda a área do D-Pad é zona de toque (quadrantes pelas diagonais) e
+        // deslizar o dedo muda de direção sem o levantar.
+        const dpad = document.getElementById('dpad');
+        const dpadBtns = {
+            up: document.getElementById('btnUp'), down: document.getElementById('btnDown'),
+            left: document.getElementById('btnLeft'), right: document.getElementById('btnRight')
+        };
+        const dpadPointers = new Set();
+        function dpadHighlight(dir) {
+            Object.keys(dpadBtns).forEach(k => dpadBtns[k].classList.toggle('active-pressed', k === dir));
+        }
+        function dpadHandle(e) {
+            const r = dpad.getBoundingClientRect();
+            const nx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+            const ny = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+            if (Math.hypot(nx, ny) < 0.12) return; // zona morta no centro
+            let dir;
+            if (Math.abs(nx) > Math.abs(ny)) dir = nx > 0 ? 'right' : 'left';
+            else dir = ny > 0 ? 'down' : 'up';
+            if (dir === 'up') setDirection(0, -1);
+            if (dir === 'down') setDirection(0, 1);
+            if (dir === 'left') setDirection(-1, 0);
+            if (dir === 'right') setDirection(1, 0);
+            dpadHighlight(dir);
+        }
+        dpad.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            dpadPointers.add(e.pointerId);
+            try { dpad.setPointerCapture(e.pointerId); } catch (err) {}
+            dpadHandle(e);
         });
+        dpad.addEventListener('pointermove', (e) => {
+            if (dpadPointers.has(e.pointerId)) dpadHandle(e);
+        });
+        const dpadEnd = (e) => {
+            dpadPointers.delete(e.pointerId);
+            if (dpadPointers.size === 0) dpadHighlight(null);
+        };
+        dpad.addEventListener('pointerup', dpadEnd);
+        dpad.addEventListener('pointercancel', dpadEnd);
+        dpad.addEventListener('contextmenu', (e) => e.preventDefault());
 
         document.getElementById('startBtn').addEventListener('click', startGame);
 
@@ -585,6 +616,151 @@ var RETRO = (function () {
             return map[gridY][gridX] === 1;
         }
 
+        // ===== Velocidade: Pac-Man e fantasmas partilham a mesma base =====
+        const BASE_SPEED = 2;        // px/frame no nível 1
+        const LEVEL_SPEEDUP = 0.05;  // +5% por nível (para desligar: 0)
+        const MAX_SPEED_MULT = 1.5;
+        const TURN_TOLERANCE = 9;    // px de margem para virar antes/depois do cruzamento
+        const EAT_RADIUS = 7;        // px do centro da casa para comer ponto/pílula
+        function speedMult() { return Math.min(MAX_SPEED_MULT, 1 + (level - 1) * LEVEL_SPEEDUP); }
+
+        // Come o que estiver na casa (ponto/pílula). Devolve true se o nível terminou.
+        function eatAt(tx, ty) {
+            const cell = map[ty] && map[ty][tx];
+            if (cell !== 0 && cell !== 2) return false;
+            map[ty][tx] = 3;
+            if (cell === 0) {
+                addScore(10);
+                playSound('dot');
+            } else {
+                addScore(50);
+                frightenedTimer = 300;
+                ghostChain = 0;
+                ghosts.forEach(g => { g.vuln = true; });
+                playSound('power');
+            }
+            dotsEaten++;
+            if (fruitsSpawned < FRUIT_AT.length && dotsEaten >= FRUIT_AT[fruitsSpawned]) {
+                fruitsSpawned++;
+                const f = fruitForLevel(level);
+                fruit = {
+                    px: FRUIT_TILE.x * TILE_SIZE, py: FRUIT_TILE.y * TILE_SIZE,
+                    emoji: f.emoji, points: f.points, timer: FRUIT_TIME
+                };
+            }
+            if (!checkDotsRemaining()) {
+                nextLevel();
+                return true;
+            }
+            return false;
+        }
+
+        // Um passo de 1 px do Pac-Man. Devolve true se o nível terminou.
+        function stepPacman() {
+            const T = TILE_SIZE;
+            const nx = pacman.nextDirX, ny = pacman.nextDirY;
+            const wants = nx !== 0 || ny !== 0;
+
+            // 1. Inversão imediata (180º), em qualquer ponto
+            if (wants && (pacman.dirX !== 0 || pacman.dirY !== 0) && nx === -pacman.dirX && ny === -pacman.dirY) {
+                pacman.dirX = nx;
+                pacman.dirY = ny;
+            }
+
+            // 2. Viragem com tolerância (antes ou depois do cruzamento)
+            if (wants) {
+                if (pacman.dirX !== 0 && ny !== 0) {
+                    const col = Math.round(pacman.px / T), row = Math.round(pacman.py / T);
+                    if (Math.abs(pacman.px - col * T) <= TURN_TOLERANCE && !isWall(col, row + ny)) {
+                        pacman.dirX = 0;
+                        pacman.dirY = ny;
+                    }
+                } else if (pacman.dirY !== 0 && nx !== 0) {
+                    const col = Math.round(pacman.px / T), row = Math.round(pacman.py / T);
+                    if (Math.abs(pacman.py - row * T) <= TURN_TOLERANCE && !isWall(col + nx, row)) {
+                        pacman.dirY = 0;
+                        pacman.dirX = nx;
+                    }
+                }
+            }
+
+            // 3. Alinhado à grelha: arrancar a partir de parado / parar na parede
+            if (pacman.px % T === 0 && pacman.py % T === 0) {
+                pacman.x = Math.round(pacman.px / T);
+                pacman.y = Math.round(pacman.py / T);
+                if (wants && !isWall(pacman.x + nx, pacman.y + ny)) {
+                    pacman.dirX = nx;
+                    pacman.dirY = ny;
+                }
+                if (isWall(pacman.x + pacman.dirX, pacman.y + pacman.dirY)) {
+                    pacman.dirX = 0;
+                    pacman.dirY = 0;
+                }
+            }
+
+            // 4. Mover 1 px
+            pacman.px += pacman.dirX;
+            pacman.py += pacman.dirY;
+            if (pacman.px < 0) pacman.px = 18 * T;
+            if (pacman.px > 18 * T) pacman.px = 0;
+
+            // 5. Centrar suavemente no eixo transversal (em vez de teleportar)
+            if (pacman.dirX !== 0) {
+                const target = Math.round(pacman.py / T) * T;
+                if (pacman.py !== target) pacman.py += Math.sign(target - pacman.py);
+            } else if (pacman.dirY !== 0) {
+                const target = Math.round(pacman.px / T) * T;
+                if (pacman.px !== target) pacman.px += Math.sign(target - pacman.px);
+            }
+
+            // 6. Comer pontos/pílulas por proximidade (também ao cortar curvas)
+            const tx = Math.round(pacman.px / T), ty = Math.round(pacman.py / T);
+            if (Math.hypot(pacman.px - tx * T, pacman.py - ty * T) <= EAT_RADIUS) {
+                return eatAt(tx, ty);
+            }
+            return false;
+        }
+
+        // Um passo de 1 px de um fantasma
+        function stepGhost(g) {
+            if (g.px % TILE_SIZE === 0 && g.py % TILE_SIZE === 0) {
+                g.x = Math.round(g.px / TILE_SIZE);
+                g.y = Math.round(g.py / TILE_SIZE);
+
+                const validDirections = [
+                    { x: 0, y: -1 },
+                    { x: 0, y: 1 },
+                    { x: -1, y: 0 },
+                    { x: 1, y: 0 }
+                ].filter(d => !isWall(g.x + d.x, g.y + d.y));
+
+                const forwardDirs = validDirections.filter(d => !(d.x === -g.dirX && d.y === -g.dirY));
+
+                if (forwardDirs.length > 0) {
+                    const chosen = forwardDirs[Math.floor(Math.random() * forwardDirs.length)];
+                    g.dirX = chosen.x;
+                    g.dirY = chosen.y;
+                } else if (validDirections.length > 0) {
+                    const chosen = validDirections[Math.floor(Math.random() * validDirections.length)];
+                    g.dirX = chosen.x;
+                    g.dirY = chosen.y;
+                } else {
+                    g.dirX = 0;
+                    g.dirY = 0;
+                }
+
+                if (isWall(g.x + g.dirX, g.y + g.dirY)) {
+                    g.dirX = 0;
+                    g.dirY = 0;
+                }
+            }
+
+            g.px += g.dirX;
+            g.py += g.dirY;
+            if (g.px < 0) g.px = 18 * TILE_SIZE;
+            if (g.px > 18 * TILE_SIZE) g.px = 0;
+        }
+
         function update() {
             if (!isPlaying || isTransitioning) return;
 
@@ -592,99 +768,14 @@ var RETRO = (function () {
                 frightenedTimer--;
             }
 
-            // OTIMIZAÇÃO DE MOVIMENTAÇÃO & CORNERING DO PAC-MAN
+            // Velocidade única (Pac-Man e fantasmas escalam juntos)
+            pacman.speed = BASE_SPEED * speedMult();
 
-            // 1. Inversão Imediata (180º)
-            if (pacman.nextDirX === -pacman.dirX && pacman.nextDirY === -pacman.dirY && (pacman.nextDirX !== 0 || pacman.nextDirY !== 0)) {
-                pacman.dirX = pacman.nextDirX;
-                pacman.dirY = pacman.nextDirY;
+            pacman.acc = (pacman.acc || 0) + pacman.speed;
+            while (pacman.acc >= 1) {
+                pacman.acc -= 1;
+                if (stepPacman()) return;
             }
-
-            // 2. Cornering Inteligente (Assistente de Curva - 8px tolerance)
-            const tolerance = 8;
-            if (pacman.nextDirX !== 0 || pacman.nextDirY !== 0) {
-                if (pacman.dirX !== 0 && pacman.nextDirY !== 0) {
-                    const nearGridX = Math.round(pacman.px / TILE_SIZE);
-                    const distToGridX = Math.abs(pacman.px - nearGridX * TILE_SIZE);
-                    if (distToGridX <= tolerance) {
-                        const currentGridY = Math.round(pacman.py / TILE_SIZE);
-                        if (!isWall(nearGridX, currentGridY + pacman.nextDirY)) {
-                            pacman.px = nearGridX * TILE_SIZE;
-                            pacman.dirX = 0;
-                            pacman.dirY = pacman.nextDirY;
-                        }
-                    }
-                } 
-                else if (pacman.dirY !== 0 && pacman.nextDirX !== 0) {
-                    const nearGridY = Math.round(pacman.py / TILE_SIZE);
-                    const distToGridY = Math.abs(pacman.py - nearGridY * TILE_SIZE);
-                    if (distToGridY <= tolerance) {
-                        const currentGridX = Math.round(pacman.px / TILE_SIZE);
-                        if (!isWall(currentGridX + pacman.nextDirX, nearGridY)) {
-                            pacman.py = nearGridY * TILE_SIZE;
-                            pacman.dirY = 0;
-                            pacman.dirX = pacman.nextDirX;
-                        }
-                    }
-                }
-            }
-
-            // 3. Verificação Normal de Interseção
-            if (pacman.px % TILE_SIZE === 0 && pacman.py % TILE_SIZE === 0) {
-                pacman.x = Math.round(pacman.px / TILE_SIZE);
-                pacman.y = Math.round(pacman.py / TILE_SIZE);
-
-                let ateDot = false;
-                if (map[pacman.y] && map[pacman.y][pacman.x] === 0) {
-                    map[pacman.y][pacman.x] = 3;
-                    addScore(10);
-                    playSound('dot');
-                    ateDot = true;
-                } else if (map[pacman.y] && map[pacman.y][pacman.x] === 2) {
-                    map[pacman.y][pacman.x] = 3;
-                    addScore(50);
-                    frightenedTimer = 300;
-                    ghostChain = 0;
-                    ghosts.forEach(g => { g.vuln = true; });
-                    playSound('power');
-                    ateDot = true;
-                }
-
-                if (ateDot) {
-                    dotsEaten++;
-                    if (fruitsSpawned < FRUIT_AT.length && dotsEaten >= FRUIT_AT[fruitsSpawned]) {
-                        fruitsSpawned++;
-                        const f = fruitForLevel(level);
-                        fruit = {
-                            px: FRUIT_TILE.x * TILE_SIZE, py: FRUIT_TILE.y * TILE_SIZE,
-                            emoji: f.emoji, points: f.points, timer: FRUIT_TIME
-                        };
-                    }
-                }
-
-                if (ateDot && !checkDotsRemaining()) {
-                    nextLevel();
-                    return;
-                }
-
-                if (pacman.nextDirX !== 0 || pacman.nextDirY !== 0) {
-                    if (!isWall(pacman.x + pacman.nextDirX, pacman.y + pacman.nextDirY)) {
-                        pacman.dirX = pacman.nextDirX;
-                        pacman.dirY = pacman.nextDirY;
-                    }
-                }
-
-                if (isWall(pacman.x + pacman.dirX, pacman.y + pacman.dirY)) {
-                    pacman.dirX = 0;
-                    pacman.dirY = 0;
-                }
-            }
-
-            pacman.px += pacman.dirX * pacman.speed;
-            pacman.py += pacman.dirY * pacman.speed;
-
-            if (pacman.px < 0) pacman.px = 18 * TILE_SIZE;
-            if (pacman.px > 18 * TILE_SIZE) pacman.px = 0;
 
             pacman.mouthAngle += pacman.mouthSpeed;
             if (pacman.mouthAngle > 0.45 || pacman.mouthAngle < 0.05) pacman.mouthSpeed = -pacman.mouthSpeed;
@@ -706,47 +797,13 @@ var RETRO = (function () {
             popups = popups.filter(p => p.ttl > 0);
 
             ghosts.forEach(g => {
-                const speed = (frightenedTimer > 0 && g.vuln) ? 1 : 2;
-
-                if (g.px % TILE_SIZE === 0 && g.py % TILE_SIZE === 0) {
-                    g.x = Math.round(g.px / TILE_SIZE);
-                    g.y = Math.round(g.py / TILE_SIZE);
-
-                    const validDirections = [
-                        { x: 0, y: -1 },
-                        { x: 0, y: 1 },
-                        { x: -1, y: 0 },
-                        { x: 1, y: 0 }
-                    ].filter(d => !isWall(g.x + d.x, g.y + d.y));
-
-                    let forwardDirs = validDirections.filter(d => !(d.x === -g.dirX && d.y === -g.dirY));
-
-                    if (forwardDirs.length > 0) {
-                        const chosen = forwardDirs[Math.floor(Math.random() * forwardDirs.length)];
-                        g.dirX = chosen.x;
-                        g.dirY = chosen.y;
-                    } else if (validDirections.length > 0) {
-                        const chosen = validDirections[Math.floor(Math.random() * validDirections.length)];
-                        g.dirX = chosen.x;
-                        g.dirY = chosen.y;
-                    } else {
-                        g.dirX = 0;
-                        g.dirY = 0;
-                    }
+                // Mesma velocidade do Pac-Man; metade quando vulneráveis
+                const speed = pacman.speed * ((frightenedTimer > 0 && g.vuln) ? 0.5 : 1);
+                g.acc = (g.acc || 0) + speed;
+                while (g.acc >= 1) {
+                    g.acc -= 1;
+                    stepGhost(g);
                 }
-
-                if (g.px % TILE_SIZE === 0 && g.py % TILE_SIZE === 0) {
-                    if (isWall(g.x + g.dirX, g.y + g.dirY)) {
-                        g.dirX = 0;
-                        g.dirY = 0;
-                    }
-                }
-
-                g.px += g.dirX * speed;
-                g.py += g.dirY * speed;
-
-                if (g.px < 0) g.px = 18 * TILE_SIZE;
-                if (g.px > 18 * TILE_SIZE) g.px = 0;
 
                 if (!isPlaying) return;
                 const dist = Math.hypot(pacman.px - g.px, pacman.py - g.py);
