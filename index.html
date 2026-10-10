@@ -333,6 +333,22 @@ var RETRO = (function () {
                     gain.gain.linearRampToValueAtTime(0.01, now + 0.45);
                     osc.start(now);
                     osc.stop(now + 0.45);
+                } else if (type === 'fruit') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(700, now);
+                    osc.frequency.setValueAtTime(1000, now + 0.07);
+                    osc.frequency.setValueAtTime(1400, now + 0.14);
+                    gain.gain.setValueAtTime(0.1, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 0.22);
+                    osc.start(now);
+                    osc.stop(now + 0.22);
+                } else if (type === 'extra') {
+                    osc.type = 'triangle';
+                    [523, 659, 784, 1047, 1319].forEach((f, i) => osc.frequency.setValueAtTime(f, now + i * 0.1));
+                    gain.gain.setValueAtTime(0.2, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 0.55);
+                    osc.start(now);
+                    osc.stop(now + 0.55);
                 } else if (type === 'die') {
                     osc.type = 'sawtooth';
                     osc.frequency.setValueAtTime(500, now);
@@ -387,6 +403,53 @@ var RETRO = (function () {
         let isTransitioning = false;
         let frightenedTimer = 0;
 
+        // Vida extra, frutas bónus e cadeia de fantasmas
+        const EXTRA_LIFE_SCORE = 10000;
+        let extraLifeGiven = false;
+        let ghostChain = 0;              // 0..3 -> 200, 400, 800, 1600
+        let dotsEaten = 0;
+        let fruitsSpawned = 0;
+        let fruit = null;                // { x, y, px, py, emoji, points, timer }
+        let popups = [];                 // textos flutuantes { px, py, text, color, ttl }
+        const FRUIT_TIME = 570;          // ~9,5 s a 60 fps
+        const FRUIT_TILE = { x: 9, y: 12 }; // logo abaixo da casa dos fantasmas
+        // Pastilhas (pontos + pílulas) do mapa; originais: 70 e 170 em 244 -> escalado
+        const TOTAL_DOTS = MAP_TEMPLATE.flat().filter(v => v === 0 || v === 2).length;
+        const FRUIT_AT = [Math.round(TOTAL_DOTS * 70 / 244), Math.round(TOTAL_DOTS * 170 / 244)];
+        // Fruta por nível (como no original)
+        function fruitForLevel(l) {
+            if (l === 1) return { emoji: '🍒', points: 100 };
+            if (l === 2) return { emoji: '🍓', points: 300 };
+            if (l <= 4)  return { emoji: '🍊', points: 500 };
+            if (l <= 6)  return { emoji: '🍎', points: 700 };
+            if (l <= 8)  return { emoji: '🍈', points: 1000 };
+            if (l <= 10) return { emoji: '🚀', points: 2000 };
+            if (l <= 12) return { emoji: '🔔', points: 3000 };
+            return { emoji: '🔑', points: 5000 };
+        }
+
+        function addPopup(px, py, text, color) {
+            popups.push({ px: px, py: py, text: String(text), color: color || '#ffffff', ttl: 60 });
+        }
+
+        // Todas as pontuações passam por aqui: atualiza HUD, recorde e vida extra
+        function addScore(n) {
+            score += n;
+            document.getElementById('scoreText').textContent = score;
+            if (score > highScore) {
+                highScore = score;
+                try { localStorage.setItem('pacman_highscore', highScore); } catch (e) {}
+                document.getElementById('highScoreText').textContent = highScore;
+            }
+            if (!extraLifeGiven && score >= EXTRA_LIFE_SCORE) {
+                extraLifeGiven = true;
+                lives++;
+                updateLivesUI();
+                playSound('extra');
+                addPopup(pacman.px, pacman.py - TILE_SIZE, '1UP', '#4ade80');
+            }
+        }
+
         document.getElementById('highScoreText').textContent = highScore;
 
         // Pac-Man
@@ -406,10 +469,10 @@ var RETRO = (function () {
 
         function initGhosts() {
             ghosts = [
-                { x: 9, y: 8, px: 9 * TILE_SIZE, py: 8 * TILE_SIZE, dirX: 1, dirY: 0, color: GHOST_COLORS[0] },
-                { x: 9, y: 9, px: 9 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: -1, dirY: 0, color: GHOST_COLORS[1] },
-                { x: 8, y: 9, px: 8 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: 0, dirY: -1, color: GHOST_COLORS[2] },
-                { x: 10, y: 9, px: 10 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: 0, dirY: 1, color: GHOST_COLORS[3] }
+                { x: 9, y: 8, px: 9 * TILE_SIZE, py: 8 * TILE_SIZE, dirX: 1, dirY: 0, color: GHOST_COLORS[0], vuln: true },
+                { x: 9, y: 9, px: 9 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: -1, dirY: 0, color: GHOST_COLORS[1], vuln: true },
+                { x: 8, y: 9, px: 8 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: 0, dirY: -1, color: GHOST_COLORS[2], vuln: true },
+                { x: 10, y: 9, px: 10 * TILE_SIZE, py: 9 * TILE_SIZE, dirX: 0, dirY: 1, color: GHOST_COLORS[3], vuln: true }
             ];
         }
 
@@ -427,6 +490,12 @@ var RETRO = (function () {
             level = 1;
             lives = 3;
             frightenedTimer = 0;
+            extraLifeGiven = false;
+            ghostChain = 0;
+            dotsEaten = 0;
+            fruitsSpawned = 0;
+            fruit = null;
+            popups = [];
             isTransitioning = false;
             document.getElementById('scoreText').textContent = score;
             document.getElementById('levelText').textContent = level;
@@ -451,17 +520,11 @@ var RETRO = (function () {
         function nextLevel() {
             isTransitioning = true;
             playSound('win');
-            score += 1000;
+            addScore(1000);
             level++;
+            fruit = null;
 
-            document.getElementById('scoreText').textContent = score;
             document.getElementById('levelText').textContent = level;
-
-            if (score > highScore) {
-                highScore = score;
-                localStorage.setItem('pacman_highscore', highScore);
-                document.getElementById('highScoreText').textContent = highScore;
-            }
 
             const banner = document.getElementById('levelBanner');
             document.getElementById('bannerTitle').textContent = `NÍVEL ${level}`;
@@ -471,6 +534,10 @@ var RETRO = (function () {
             setTimeout(() => {
                 map = JSON.parse(JSON.stringify(MAP_TEMPLATE));
                 frightenedTimer = 0;
+                dotsEaten = 0;
+                fruitsSpawned = 0;
+                fruit = null;
+                popups = [];
                 resetPositions();
                 banner.classList.add('hidden');
                 isTransitioning = false;
@@ -570,22 +637,29 @@ var RETRO = (function () {
                 let ateDot = false;
                 if (map[pacman.y] && map[pacman.y][pacman.x] === 0) {
                     map[pacman.y][pacman.x] = 3;
-                    score += 10;
+                    addScore(10);
                     playSound('dot');
                     ateDot = true;
                 } else if (map[pacman.y] && map[pacman.y][pacman.x] === 2) {
                     map[pacman.y][pacman.x] = 3;
-                    score += 50;
+                    addScore(50);
                     frightenedTimer = 300;
+                    ghostChain = 0;
+                    ghosts.forEach(g => { g.vuln = true; });
                     playSound('power');
                     ateDot = true;
                 }
 
-                document.getElementById('scoreText').textContent = score;
-                if (score > highScore) {
-                    highScore = score;
-                    localStorage.setItem('pacman_highscore', highScore);
-                    document.getElementById('highScoreText').textContent = highScore;
+                if (ateDot) {
+                    dotsEaten++;
+                    if (fruitsSpawned < FRUIT_AT.length && dotsEaten >= FRUIT_AT[fruitsSpawned]) {
+                        fruitsSpawned++;
+                        const f = fruitForLevel(level);
+                        fruit = {
+                            px: FRUIT_TILE.x * TILE_SIZE, py: FRUIT_TILE.y * TILE_SIZE,
+                            emoji: f.emoji, points: f.points, timer: FRUIT_TIME
+                        };
+                    }
                 }
 
                 if (ateDot && !checkDotsRemaining()) {
@@ -615,8 +689,24 @@ var RETRO = (function () {
             pacman.mouthAngle += pacman.mouthSpeed;
             if (pacman.mouthAngle > 0.45 || pacman.mouthAngle < 0.05) pacman.mouthSpeed = -pacman.mouthSpeed;
 
+            // Fruta bónus: tempo limite e apanhar
+            if (fruit) {
+                fruit.timer--;
+                if (fruit.timer <= 0) {
+                    fruit = null;
+                } else if (Math.hypot(pacman.px - fruit.px, pacman.py - fruit.py) < TILE_SIZE * 0.7) {
+                    addScore(fruit.points);
+                    playSound('fruit');
+                    addPopup(fruit.px, fruit.py, fruit.points, '#f9a8d4');
+                    fruit = null;
+                }
+            }
+
+            popups.forEach(p => { p.ttl--; p.py -= 0.3; });
+            popups = popups.filter(p => p.ttl > 0);
+
             ghosts.forEach(g => {
-                const speed = (frightenedTimer > 0) ? 1 : 2;
+                const speed = (frightenedTimer > 0 && g.vuln) ? 1 : 2;
 
                 if (g.px % TILE_SIZE === 0 && g.py % TILE_SIZE === 0) {
                     g.x = Math.round(g.px / TILE_SIZE);
@@ -661,8 +751,12 @@ var RETRO = (function () {
                 if (!isPlaying) return;
                 const dist = Math.hypot(pacman.px - g.px, pacman.py - g.py);
                 if (dist < TILE_SIZE * 0.8) {
-                    if (frightenedTimer > 0) {
-                        score += 200;
+                    if (frightenedTimer > 0 && g.vuln) {
+                        const pts = 200 * Math.pow(2, ghostChain); // 200, 400, 800, 1600
+                        ghostChain = Math.min(ghostChain + 1, 3);
+                        addScore(pts);
+                        addPopup(g.px, g.py, pts, '#22d3ee');
+                        g.vuln = false; // volta à casa e já não é vulnerável até à próxima pílula
                         playSound('eatGhost');
                         g.px = 9 * TILE_SIZE;
                         g.py = 9 * TILE_SIZE;
@@ -716,6 +810,15 @@ var RETRO = (function () {
                 }
             }
 
+            // Fruta bónus (pisca nos últimos ~2 s)
+            if (fruit && (fruit.timer > 120 || Math.floor(fruit.timer / 8) % 2 === 0)) {
+                ctx.font = '16px serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(fruit.emoji, fruit.px + TILE_SIZE / 2, fruit.py + TILE_SIZE / 2 + 1);
+            }
+
             ctx.fillStyle = '#eab308';
             ctx.beginPath();
             let rotation = 0;
@@ -735,7 +838,7 @@ var RETRO = (function () {
             ctx.fill();
 
             ghosts.forEach(g => {
-                ctx.fillStyle = frightenedTimer > 0 ? '#3b82f6' : g.color;
+                ctx.fillStyle = (frightenedTimer > 0 && g.vuln) ? '#3b82f6' : g.color;
                 const gx = g.px + TILE_SIZE/2;
                 const gy = g.py + TILE_SIZE/2;
                 const radius = TILE_SIZE/2 - 1;
@@ -759,6 +862,17 @@ var RETRO = (function () {
                 ctx.arc(gx + 3, gy - 3, 1, 0, Math.PI * 2);
                 ctx.fill();
             });
+
+            // Pontos flutuantes (fantasmas, frutas, 1UP)
+            if (popups.length) {
+                ctx.font = 'bold 11px Rajdhani, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                popups.forEach(p => {
+                    ctx.fillStyle = p.color;
+                    ctx.fillText(p.text, p.px + TILE_SIZE / 2, p.py + TILE_SIZE / 2);
+                });
+            }
         }
 
         function gameLoop() {
